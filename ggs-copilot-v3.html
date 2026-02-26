@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GGS Listing Copilot - V3</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #9CA3AF; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback, useRef } = React;
+
+
+// ─── Data ───
+const INITIAL_IMAGES = [
+  { id: 1, label: "Main", emoji: "🪑", issue: "watermark", fixed: false },
+  { id: 2, label: "Angle 1", emoji: "🪑", issue: "dark", fixed: false },
+  { id: 3, label: "Angle 2", emoji: "🪑", issue: null, fixed: false },
+  { id: 4, label: "Detail", emoji: "🪑", issue: "messy_bg", fixed: false },
+  { id: 5, label: "Scene", emoji: "🪑", issue: null, fixed: false },
+  { id: 6, label: "Pack", emoji: "📦", issue: null, fixed: false },
+];
+
+const TITLE_CHECKS = [
+  { id: "brand", type: "red", label: 'Remove "CH-Factory"', desc: "Brand prefixes don't help — buyers don't search by your factory name", action: "remove", target: "CH-Factory ", fixed: false },
+  { id: "geo", type: "orange", label: 'Remove "Vietnam"', desc: "Unless specifically targeting Vietnam buyers, this wastes character space", action: "remove", target: " Vietnam", fixed: false },
+  { id: "material", type: "orange", label: 'Add "Aluminum"', desc: "15K monthly searches — 78% of top listings include frame material", action: "insert", target: "Aluminum", fixed: false },
+  { id: "kw1", type: "orange", label: 'Add "Garden Recliner"', desc: "7K monthly searches — top converting keyword in this category", action: "insert", target: "Garden Recliner", fixed: false },
+  { id: "kw2", type: "green", label: 'Add "Portable Beach"', desc: "4K monthly searches — bonus keyword for beach/resort segment", action: "insert", target: "Portable Beach", fixed: false },
+];
+
+const KEYWORDS_POOL = [
+  { word: "outdoor folding chair", vol: "18K", inserted: false },
+  { word: "portable lounge chair", vol: "12K", inserted: false },
+  { word: "mesh fabric sun lounger", vol: "9K", inserted: false },
+  { word: "garden recliner", vol: "7K", inserted: false },
+];
+
+const ATTRS = [
+  { key: "material", label: "Frame Material", val: "Aluminum Alloy", conf: 92, req: true, filled: false, src: "Detected from image" },
+  { key: "fabric", label: "Fabric Type", val: "Textilene Mesh", conf: 87, req: true, filled: false, src: "Detected from image" },
+  { key: "fold", label: "Foldable", val: "Yes", conf: 95, req: true, filled: false, src: "Detected from image" },
+  { key: "weight_cap", label: "Weight Capacity", val: "120 kg", conf: 72, req: false, filled: false, src: "Category average" },
+  { key: "color", label: "Available Colors", val: "Khaki, Black, Grey", conf: 68, req: false, filled: false, src: "AI suggestion" },
+  { key: "cert", label: "Certification", val: "SGS, EN581", conf: 60, req: false, filled: false, src: "Buyers frequently search" },
+];
+
+const TOP_TITLES = [
+  "Wholesale Outdoor Folding Sun Lounger Portable Aluminum Garden Recliner with Mesh Fabric",
+  "Factory Direct Lightweight Patio Lounge Chair Foldable Beach Sun Lounger for Resort Hotel",
+  "OEM Custom Outdoor Folding Chair Textilene Mesh Portable Sun Lounger Garden Furniture",
+];
+
+// ─── Score ───
+function calcScore({ images, title, titleChecks, keywords, attrs, hasPrice }) {
+  let s = 0;
+  s += Math.min(images.filter(i => !i.issue || i.fixed).length * 4, 24);
+  if (images.length >= 5) s += 3;
+  if (title.length > 20) s += 6;
+  if (title.length > 50) s += 4;
+  if (title.length > 80) s += 2;
+  s += titleChecks.filter(t => t.fixed).length * 3;
+  s += keywords.filter(k => k.inserted).length * 3;
+  s += attrs.filter(a => a.req && a.filled).length * 7;
+  s += attrs.filter(a => !a.req && a.filled).length * 3;
+  if (hasPrice) s += 6;
+  return Math.min(Math.max(Math.round(s), 0), 100);
+}
+function toSix(s) { return (s / 100 * 6).toFixed(1); }
+function topPct(s) { if (s >= 90) return 5; if (s >= 80) return 12; if (s >= 70) return 25; if (s >= 60) return 40; return 55; }
+
+// ─── Components ───
+function Badge({ color, children }) {
+  const m = { red: { bg: "#FEF2F2", c: "#DC2626", b: "#FECACA" }, orange: { bg: "#FFF7ED", c: "#EA580C", b: "#FED7AA" }, green: { bg: "#F0FDF4", c: "#16A34A", b: "#BBF7D0" }, blue: { bg: "#EFF6FF", c: "#2563EB", b: "#BFDBFE" }, gray: { bg: "#F9FAFB", c: "#6B7280", b: "#E5E7EB" } };
+  const t = m[color] || m.gray;
+  return <span style={{ background: t.bg, color: t.c, border: `1px solid ${t.b}`, borderRadius: 4, padding: "2px 8px", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}>{children}</span>;
+}
+
+function Btn({ children, variant = "primary", size = "sm", onClick, disabled, style: sx }) {
+  const base = { border: "none", borderRadius: 6, cursor: disabled ? "not-allowed" : "pointer", fontWeight: 600, fontFamily: "inherit", transition: "all 0.15s", display: "inline-flex", alignItems: "center", gap: 4, opacity: disabled ? 0.5 : 1 };
+  const sizes = { sm: { padding: "5px 12px", fontSize: 12 }, md: { padding: "8px 16px", fontSize: 13 }, xs: { padding: "3px 8px", fontSize: 11 } };
+  const vars = {
+    primary: { background: "#FF6A00", color: "#fff" },
+    secondary: { background: "#F3F4F6", color: "#374151" },
+    ghost: { background: "transparent", color: "#2563EB", padding: "3px 6px" },
+    danger: { background: "#DC2626", color: "#fff" },
+    success: { background: "#16A34A", color: "#fff" },
+    outline: { background: "#fff", color: "#FF6A00", border: "1px solid #FF6A00" },
+  };
+  return <button onClick={disabled ? undefined : onClick} style={{ ...base, ...sizes[size], ...vars[variant], ...sx }}>{children}</button>;
+}
+
+// Inline title suggestion chip
+function TitleSuggestion({ check, onApply, onSkip }) {
+  if (check.fixed) {
+    return (
+      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 0", opacity: 0.5 }}>
+        <span style={{ color: "#16A34A", fontSize: 13 }}>✓</span>
+        <span style={{ fontSize: 12, color: "#6B7280", textDecoration: "line-through" }}>{check.label}</span>
+      </div>
+    );
+  }
+  const colors = { red: "#DC2626", orange: "#EA580C", green: "#16A34A" };
+  return (
+    <div style={{
+      display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 10px", marginBottom: 4,
+      background: check.type === "red" ? "#FEF2F2" : check.type === "orange" ? "#FFFBF5" : "#FAFFF5",
+      border: `1px solid ${check.type === "red" ? "#FECACA" : check.type === "orange" ? "#FDE8CD" : "#DDF0CC"}`,
+      borderRadius: 8, transition: "all 0.2s",
+    }}>
+      <span style={{ width: 6, height: 6, borderRadius: 99, background: colors[check.type], marginTop: 5, flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 12, fontWeight: 600, color: "#1F2937" }}>{check.label}</div>
+        <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2, lineHeight: 1.4 }}>{check.desc}</div>
+      </div>
+      <div style={{ display: "flex", gap: 4, flexShrink: 0, marginTop: 2 }}>
+        <Btn variant="primary" size="xs" onClick={onApply}>Apply</Btn>
+        <Btn variant="secondary" size="xs" onClick={onSkip}>Skip</Btn>
+      </div>
+    </div>
+  );
+}
+
+function IssueCard({ severity, title, desc, actions, done }) {
+  const sev = { red: { dot: "#DC2626", bg: "#FEF2F2", b: "#FECACA" }, orange: { dot: "#EA580C", bg: "#FFF7ED", b: "#FED7AA" }, green: { dot: "#16A34A", bg: "#F0FDF4", b: "#BBF7D0" } };
+  const s = sev[severity] || sev.orange;
+  return (
+    <div style={{ background: done ? "#F9FAFB" : s.bg, border: `1px solid ${done ? "#E5E7EB" : s.b}`, borderRadius: 8, padding: "10px 12px", marginBottom: 6, opacity: done ? 0.5 : 1, transition: "all 0.3s" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <span style={{ width: 7, height: 7, borderRadius: 99, background: done ? "#16A34A" : s.dot, marginTop: 5, flexShrink: 0 }} />
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "#1F2937", lineHeight: 1.5 }}>{done ? "✓ " : ""}{title}</div>
+          {desc && !done && <div style={{ fontSize: 11, color: "#6B7280", marginTop: 2 }}>{desc}</div>}
+          {actions && !done && <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>{actions.map((a, i) => <Btn key={i} variant={i === 0 ? "primary" : "secondary"} size="xs" onClick={a.onClick}>{a.label}</Btn>)}</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ChatBubble({ role, text, actions }) {
+  const isAI = role === "ai";
+  return (
+    <div style={{ display: "flex", justifyContent: isAI ? "flex-start" : "flex-end", marginBottom: 10 }}>
+      <div style={{
+        maxWidth: "88%", background: isAI ? "#F3F4F6" : "#FF6A00", color: isAI ? "#1F2937" : "#fff",
+        borderRadius: isAI ? "2px 12px 12px 12px" : "12px 2px 12px 12px", padding: "10px 14px", fontSize: 12, lineHeight: 1.6, whiteSpace: "pre-wrap",
+      }}>
+        {text}
+        {actions && <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+          {actions.map((a, i) => <button key={i} onClick={a.onClick} style={{ background: isAI ? "#fff" : "rgba(255,255,255,0.2)", color: isAI ? "#FF6A00" : "#fff", border: isAI ? "1px solid #E5E7EB" : "1px solid rgba(255,255,255,0.3)", borderRadius: 6, padding: "4px 10px", fontSize: 11, fontWeight: 600, cursor: "pointer" }}>{a.label}</button>)}
+        </div>}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════
+// MAIN
+// ═══════════════════════════════
+function App() {
+  const [images, setImages] = useState(INITIAL_IMAGES);
+  const [title, setTitle] = useState("CH-Factory Lightweight Portable Outdoor Folding Lounge Chair with Mesh Fabric for Sun Loungers Vietnam");
+  const [titleChecks, setTitleChecks] = useState(TITLE_CHECKS.map(c => ({ ...c })));
+  const [showTitlePanel, setShowTitlePanel] = useState(true);
+  const [showTopTitles, setShowTopTitles] = useState(false);
+  const [kwInput, setKwInput] = useState("Comehome brand sun lounge Outdoor folding sun lounger Vietnamese made sun lounger Lightweight mesh sun chair Portable sun lounge");
+  const [keywords, setKeywords] = useState(KEYWORDS_POOL.map(k => ({ ...k })));
+  const [attrs, setAttrs] = useState(ATTRS.map(a => ({ ...a })));
+  const [price, setPrice] = useState("");
+  const [moq, setMoq] = useState("100");
+  const [panelTab, setPanelTab] = useState("diagnosis");
+  const [flashField, setFlashField] = useState(null);
+  const [showPublish, setShowPublish] = useState(false);
+  const [chatMessages, setChatMessages] = useState([
+    { role: "ai", text: "👋 I'm your AI Listing Assistant. I handle complex requests like:\n\n• \"Rewrite my entire title for the US market\"\n• \"What's the best pricing strategy for this category?\"\n• \"Compare my listing to top competitors\"\n• \"Generate a product description\"\n\nSimple optimizations (keywords, fixes) are available directly in the form — look for the orange AI buttons!" },
+  ]);
+  const [chatInput, setChatInput] = useState("");
+  const chatEndRef = useRef(null);
+
+  const score = calcScore({ images, title, titleChecks, keywords, attrs, hasPrice: !!price });
+  const scoreOf6 = toSix(score);
+  const top = topPct(score);
+
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [chatMessages]);
+  const flash = useCallback((f) => { setFlashField(f); setTimeout(() => setFlashField(null), 1500); }, []);
+
+  const fixImage = (id) => setImages(p => p.map(i => i.id === id ? { ...i, fixed: true } : i));
+  const insertKw = (idx) => {
+    setKeywords(p => p.map((k, i) => i === idx ? { ...k, inserted: true } : k));
+    if (!keywords[idx].inserted) setTitle(prev => prev + " " + keywords[idx].word);
+  };
+  const fillAttr = (idx) => { setAttrs(p => p.map((a, i) => i === idx ? { ...a, filled: true } : a)); flash(`attr-${idx}`); };
+  const fillAllAttrs = () => { setAttrs(p => p.map(a => ({ ...a, filled: true }))); flash("attrs"); };
+
+  // Title check actions
+  const applyTitleCheck = (checkId) => {
+    const check = titleChecks.find(c => c.id === checkId);
+    if (!check || check.fixed) return;
+    if (check.action === "remove") {
+      setTitle(prev => prev.replace(check.target, "").replace(/\s+/g, " ").trim());
+    } else if (check.action === "insert") {
+      setTitle(prev => {
+        if (prev.toLowerCase().includes(check.target.toLowerCase())) return prev;
+        return prev.trim() + " " + check.target;
+      });
+    }
+    setTitleChecks(p => p.map(c => c.id === checkId ? { ...c, fixed: true } : c));
+  };
+  const skipTitleCheck = (checkId) => {
+    setTitleChecks(p => p.map(c => c.id === checkId ? { ...c, fixed: true } : c));
+  };
+  const applyAllTitleChecks = () => {
+    titleChecks.forEach(c => { if (!c.fixed) applyTitleCheck(c.id); });
+  };
+
+  const titleScore = Math.round((titleChecks.filter(c => c.fixed).length / titleChecks.length) * 100);
+  const titlePending = titleChecks.filter(c => !c.fixed).length;
+  const redCount = images.filter(i => i.issue === "watermark" && !i.fixed).length + attrs.filter(a => a.req && !a.filled).length;
+  const orangeCount = images.filter(i => (i.issue === "dark" || i.issue === "messy_bg") && !i.fixed).length + keywords.filter(k => !k.inserted).length + attrs.filter(a => !a.req && !a.filled).length;
+  const totalIssues = redCount + orangeCount + titlePending;
+
+  // Chat
+  const handleChat = (msg) => {
+    const q = (msg || chatInput).toLowerCase().trim();
+    if (!q) return;
+    setChatMessages(p => [...p, { role: "user", text: msg || chatInput }]);
+    setChatInput("");
+    setTimeout(() => {
+      let reply = { role: "ai", text: "" };
+      if (q.includes("rewrite") || q.includes("title") && q.includes("entire")) {
+        reply.text = `Here are 3 rewrite options for your title:\n\n🅰️ Search-optimized:\n"Lightweight Aluminum Outdoor Folding Sun Lounger Portable Garden Recliner Beach Chair Mesh Fabric"\n\n🅱️ B2B buyer focused:\n"Factory Direct Foldable Sun Lounger Chair OEM Aluminum Frame Textilene Mesh Outdoor Garden Furniture"\n\n🅲️ Premium positioning:\n"Premium Aluminum Folding Lounge Chair Textilene Mesh Outdoor Sun Lounger for Resort Hotel Garden"\n\nWhich one works best?`;
+        reply.actions = [
+          { label: "Use Option A", onClick: () => { setTitle("Lightweight Aluminum Outdoor Folding Sun Lounger Portable Garden Recliner Beach Chair Mesh Fabric"); setTitleChecks(p => p.map(c => ({ ...c, fixed: true }))); setChatMessages(p => [...p, { role: "ai", text: "✅ Title updated to Option A! All title checks passed." }]); }},
+          { label: "Use Option B", onClick: () => { setTitle("Factory Direct Foldable Sun Lounger Chair OEM Aluminum Frame Textilene Mesh Outdoor Garden Furniture"); setTitleChecks(p => p.map(c => ({ ...c, fixed: true }))); setChatMessages(p => [...p, { role: "ai", text: "✅ Title updated to Option B!" }]); }},
+          { label: "Use Option C", onClick: () => { setTitle("Premium Aluminum Folding Lounge Chair Textilene Mesh Outdoor Sun Lounger for Resort Hotel Garden"); setTitleChecks(p => p.map(c => ({ ...c, fixed: true }))); setChatMessages(p => [...p, { role: "ai", text: "✅ Title updated to Option C!" }]); }},
+        ];
+      } else if (q.includes("competitor") || q.includes("compare")) {
+        reply.text = `Your listing vs Top 3 competitors:\n\n📊 Title keywords coverage:\n• You: 4/10 top keywords ❌\n• Avg top listing: 7/10 ✅\n\n📸 Images:\n• You: 6 images ✅\n• Avg top listing: 7 images\n\n📋 Attributes:\n• You: ${attrs.filter(a=>a.filled).length}/${attrs.length} filled\n• Top listings: 100% filled ✅\n\n🏷 Missing vs competitors:\n• No certification mentioned\n• No MOQ lead time badge\n• No "Factory Direct" in title`;
+      } else if (q.includes("description") || q.includes("write")) {
+        reply.text = `Here's a product description draft:\n\n"Crafted with a lightweight yet durable aluminum alloy frame and premium Textilene mesh fabric, this portable folding sun lounger combines comfort with functionality. Perfect for outdoor gardens, patios, beaches, and resort pools.\n\nKey features:\n• Quick-fold mechanism for easy storage and transport\n• Weather-resistant mesh fabric — breathable and fast-drying\n• Adjustable recline positions\n• Supports up to 120kg\n\nAvailable in Khaki, Black, and Grey. OEM/Custom orders welcome. MOQ: 100 pcs."\n\nWant me to adjust the tone or add specific details?`;
+      } else if (q.includes("price") || q.includes("pricing")) {
+        reply.text = `Pricing analysis for Sun Loungers (Outdoor Furniture):\n\n📊 Category price range: $12 — $45/pc\n• Budget segment: $12-18 (basic steel frame)\n• Mid-range: $18-30 (aluminum, mesh) ← your product fits here\n• Premium: $30-45 (teak, luxury fabric)\n\n💡 Suggested price: $20-28/pc based on:\n• Aluminum frame (higher than steel)\n• Textilene mesh (mid-tier fabric)\n• Factory direct (no middleman margin)\n\n⚠️ Note: I can only suggest ranges. Please set the actual price yourself.`;
+      } else {
+        reply.text = "I can help with complex tasks like:\n\n• \"Rewrite my entire title\" — get 3 options to pick from\n• \"Compare to competitors\" — detailed gap analysis\n• \"Write a product description\" — full copywriting\n• \"Pricing strategy\" — category analysis\n\nFor quick fixes (keywords, image issues, attributes), use the inline AI buttons directly in the form — they're faster! 😊";
+      }
+      setChatMessages(p => [...p, reply]);
+    }, 600);
+  };
+
+  const fl = (f) => flashField === f ? { boxShadow: "0 0 0 2px #FF6A00", transition: "box-shadow 0.3s" } : {};
+
+  return (
+    <div style={{ fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif", background: "#F5F5F5", minHeight: "100vh" }}>
+      {/* Nav */}
+      <div style={{ background: "#fff", borderBottom: "1px solid #E5E7EB", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 52, position: "sticky", top: 0, zIndex: 100 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 18, cursor: "pointer", color: "#6B7280" }}>←</span>
+          <span style={{ fontSize: 15, fontWeight: 700, color: "#1F2937" }}>Edit a listing</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Btn variant="primary" size="md" onClick={() => setPanelTab(panelTab === "chat" ? "diagnosis" : "chat")} style={{ background: "linear-gradient(135deg, #FF6A00, #FF8C33)", borderRadius: 20 }}>🤖 AI Assistant</Btn>
+          <Btn variant="secondary" size="md">Preview</Btn>
+          <Btn variant="secondary" size="md">Save</Btn>
+          <Btn variant={score >= 80 ? "success" : "secondary"} size="md" disabled={score < 80} onClick={() => setShowPublish(true)}>Submit</Btn>
+        </div>
+      </div>
+      <div style={{ background: "#fff", borderBottom: "1px solid #E5E7EB", padding: "6px 24px", display: "flex", gap: 16, fontSize: 12, color: "#6B7280" }}>
+        <Badge color="green">Customization</Badge>
+        <span>📋 Upgrade to RTS</span>
+        <span>📦 Fixed shipping fee</span>
+        <span>⏱ MOQ lead time ≤30 days</span>
+      </div>
+
+      {/* Main */}
+      <div style={{ display: "flex", maxWidth: 1440, margin: "0 auto" }}>
+        {/* ─ Left Form ─ */}
+        <div style={{ flex: 1, padding: "20px 24px", overflow: "auto", maxHeight: "calc(100vh - 96px)" }}>
+
+          {/* === TITLE SECTION with inline AI === */}
+          <div style={{ background: "#fff", borderRadius: 8, border: "1px solid #E5E7EB", padding: 24, marginBottom: 16, ...fl("title") }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: "#1F2937", margin: "0 0 16px" }}>Product information</h3>
+
+            <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
+              Product name <span style={{ color: "#DC2626" }}>*</span>
+            </label>
+            <div style={{ position: "relative" }}>
+              <input value={title} onChange={e => setTitle(e.target.value)} style={{
+                width: "100%", padding: "10px 60px 10px 12px", border: "1px solid #D1D5DB", borderRadius: 6, fontSize: 13, color: "#1F2937", outline: "none", boxSizing: "border-box",
+              }} />
+              <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: title.length > 120 ? "#DC2626" : "#9CA3AF" }}>{title.length}/128</span>
+            </div>
+
+            {/* ── Inline Title AI Panel ── */}
+            <div style={{
+              marginTop: 10, border: "1px solid #FFE0CC", borderRadius: 10, overflow: "hidden",
+              background: "linear-gradient(180deg, #FFF8F3 0%, #FFFFFF 100%)",
+            }}>
+              {/* Header bar */}
+              <div style={{
+                display: "flex", alignItems: "center", justifyContent: "space-between",
+                padding: "8px 14px", background: "#FFF3EB", borderBottom: showTitlePanel ? "1px solid #FFE0CC" : "none",
+                cursor: "pointer",
+              }} onClick={() => setShowTitlePanel(!showTitlePanel)}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 14 }}>🤖</span>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: "#1F2937" }}>Title Optimization</span>
+                  {titlePending > 0 && (
+                    <span style={{ background: "#FF6A00", color: "#fff", borderRadius: 99, padding: "1px 7px", fontSize: 10, fontWeight: 700 }}>{titlePending}</span>
+                  )}
+                  {titlePending === 0 && (
+                    <span style={{ background: "#16A34A", color: "#fff", borderRadius: 99, padding: "1px 7px", fontSize: 10, fontWeight: 700 }}>✓ All done</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  {/* Title score mini bar */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <div style={{ width: 50, height: 4, background: "#FFE0CC", borderRadius: 99, overflow: "hidden" }}>
+                      <div style={{ width: `${titleScore}%`, height: "100%", background: titleScore === 100 ? "#16A34A" : "#FF6A00", borderRadius: 99, transition: "width 0.4s" }} />
+                    </div>
+                    <span style={{ fontSize: 10, color: "#6B7280" }}>{titleScore}%</span>
+                  </div>
+                  <span style={{ fontSize: 12, color: "#9CA3AF", transform: showTitlePanel ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>▾</span>
+                </div>
+              </div>
+
+              {showTitlePanel && (
+                <div style={{ padding: 14 }}>
+                  {/* Apply all bar */}
+                  {titlePending > 0 && (
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, padding: "6px 10px", background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 6 }}>
+                      <span style={{ fontSize: 11, color: "#EA580C" }}>{titlePending} suggestions remaining</span>
+                      <Btn variant="primary" size="xs" onClick={applyAllTitleChecks}>⚡ Apply all</Btn>
+                    </div>
+                  )}
+
+                  {/* Individual suggestions */}
+                  {titleChecks.map(c => (
+                    <TitleSuggestion key={c.id} check={c} onApply={() => applyTitleCheck(c.id)} onSkip={() => skipTitleCheck(c.id)} />
+                  ))}
+
+                  {/* Reference titles toggle */}
+                  <div style={{ marginTop: 8, borderTop: "1px solid #F3F4F6", paddingTop: 8 }}>
+                    <div onClick={() => setShowTopTitles(!showTopTitles)} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, color: "#6B7280" }}>
+                      <span>🏆</span>
+                      <span>Top competitor titles in this category</span>
+                      <span style={{ transform: showTopTitles ? "rotate(180deg)" : "rotate(0)", transition: "transform 0.2s" }}>▾</span>
+                    </div>
+                    {showTopTitles && (
+                      <div style={{ marginTop: 6 }}>
+                        {TOP_TITLES.map((t, i) => (
+                          <div key={i} style={{ fontSize: 11, color: "#6B7280", padding: "4px 0 4px 12px", borderLeft: "2px solid #E5E7EB", marginBottom: 3, lineHeight: 1.5 }}>{i + 1}. {t}</div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Chat link for complex */}
+                  <div style={{ marginTop: 10, padding: "8px 10px", background: "#EFF6FF", border: "1px solid #BFDBFE", borderRadius: 6, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 11, color: "#2563EB" }}>Need a full title rewrite? →</span>
+                    <Btn variant="ghost" size="xs" onClick={() => { setPanelTab("chat"); handleChat("Rewrite my entire title for the US market"); }}>Ask AI Chat</Btn>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Category */}
+            <div style={{ marginTop: 20 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
+                Select category <span style={{ color: "#DC2626" }}>*</span>
+              </label>
+              <div style={{ padding: "10px 12px", border: "1px solid #D1D5DB", borderRadius: 6, fontSize: 13, color: "#1F2937", background: "#F9FAFB" }}>
+                Furniture &gt; Outdoor Furniture &gt; Sun Loungers
+              </div>
+            </div>
+
+            {/* Keywords */}
+            <div style={{ marginTop: 20 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, color: "#374151", display: "block", marginBottom: 6 }}>
+                Product keywords <span style={{ color: "#DC2626" }}>*</span>
+              </label>
+              <textarea value={kwInput} onChange={e => setKwInput(e.target.value)} rows={2} style={{
+                width: "100%", padding: "10px 12px", border: "1px solid #D1D5DB", borderRadius: 6, fontSize: 13, outline: "none", resize: "vertical", boxSizing: "border-box", fontFamily: "inherit",
+              }} />
+              <div style={{ fontSize: 11, color: "#6B7280", marginTop: 4 }}>ℹ 15+ keywords → 60% more exposure</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                {keywords.map((kw, i) => (
+                  <div key={i} onClick={() => !kw.inserted && insertKw(i)} style={{
+                    display: "inline-flex", alignItems: "center", gap: 4, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 500,
+                    cursor: kw.inserted ? "default" : "pointer",
+                    background: kw.inserted ? "#F0FDF4" : "#FFF7ED", color: kw.inserted ? "#16A34A" : "#EA580C",
+                    border: `1px solid ${kw.inserted ? "#BBF7D0" : "#FED7AA"}`, transition: "all 0.2s",
+                  }}>
+                    {kw.inserted ? "✓" : "+"} {kw.word} <span style={{ color: "#9CA3AF" }}>({kw.vol})</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* === IMAGES === */}
+          <div style={{ background: "#fff", borderRadius: 8, border: "1px solid #E5E7EB", padding: 24, marginBottom: 16, ...fl("images") }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: "#1F2937", margin: "0 0 16px" }}>
+              Product images <span style={{ color: "#DC2626" }}>*</span>
+            </h3>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {images.map(img => {
+                const hasIssue = img.issue && !img.fixed;
+                return (
+                  <div key={img.id} style={{
+                    width: 100, height: 100, borderRadius: 8,
+                    border: `2px solid ${hasIssue ? (img.issue === "watermark" ? "#FECACA" : "#FED7AA") : "#E5E7EB"}`,
+                    background: hasIssue ? (img.issue === "watermark" ? "#FEF2F2" : "#FFF7ED") : "#F9FAFB",
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", position: "relative",
+                    cursor: hasIssue ? "pointer" : "default", transition: "all 0.2s",
+                  }} onClick={() => hasIssue && fixImage(img.id)} title={hasIssue ? "Click to fix" : ""}>
+                    <span style={{ fontSize: 28, filter: img.issue === "dark" && !img.fixed ? "brightness(0.4)" : "none" }}>{img.emoji}</span>
+                    <span style={{ fontSize: 9, color: "#6B7280", marginTop: 2 }}>{img.label}</span>
+                    {hasIssue && (
+                      <div style={{ position: "absolute", top: -6, right: -6, borderRadius: 99, padding: "1px 6px", fontSize: 8, fontWeight: 700, background: img.issue === "watermark" ? "#DC2626" : "#EA580C", color: "#fff" }}>
+                        {img.issue === "watermark" ? "Watermark" : img.issue === "dark" ? "Dark" : "BG"}
+                      </div>
+                    )}
+                    {hasIssue && (
+                      <div style={{ position: "absolute", bottom: 4, fontSize: 9, color: "#FF6A00", fontWeight: 600 }}>Click to fix</div>
+                    )}
+                    {!hasIssue && <div style={{ position: "absolute", top: 4, right: 6, color: "#16A34A", fontSize: 13 }}>✓</div>}
+                  </div>
+                );
+              })}
+              <div style={{ width: 100, height: 100, borderRadius: 8, border: "2px dashed #D1D5DB", display: "flex", alignItems: "center", justifyContent: "center", color: "#9CA3AF", fontSize: 11, cursor: "pointer" }}>+ Upload</div>
+            </div>
+          </div>
+
+          {/* === ATTRIBUTES === */}
+          <div style={{ background: "#fff", borderRadius: 8, border: "1px solid #E5E7EB", padding: 24, marginBottom: 16, ...fl("attrs") }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ fontSize: 15, fontWeight: 700, color: "#1F2937", margin: 0 }}>Product attributes</h3>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ width: 60, height: 4, background: "#E5E7EB", borderRadius: 99, overflow: "hidden" }}>
+                  <div style={{ width: `${(attrs.filter(a => a.filled).length / attrs.length) * 100}%`, height: "100%", background: "#FF6A00", borderRadius: 99, transition: "width 0.4s" }} />
+                </div>
+                <span style={{ fontSize: 11, fontWeight: 600, color: "#FF6A00" }}>{Math.round((attrs.filter(a => a.filled).length / attrs.length) * 100)}%</span>
+              </div>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <tbody>
+                {attrs.map((attr, i) => (
+                  <tr key={i} style={{ borderBottom: "1px solid #F3F4F6", background: flashField === `attr-${i}` ? "#FFF7ED" : "transparent", transition: "background 0.3s" }}>
+                    <td style={{ padding: "10px 8px", fontSize: 12, color: "#6B7280", width: "35%" }}>
+                      {attr.req && <span style={{ color: "#DC2626", marginRight: 4 }}>*</span>}{attr.label}
+                    </td>
+                    <td style={{ padding: "10px 8px" }}>
+                      {attr.filled ? (
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <span style={{ fontSize: 13, color: "#1F2937" }}>{attr.val}</span>
+                          <Badge color="blue">AI · {attr.conf}%</Badge>
+                        </div>
+                      ) : (
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 12, color: "#9CA3AF" }}>{attr.req ? "Required" : "Optional"}</span>
+                          <Btn variant="ghost" size="xs" onClick={() => fillAttr(i)}>💡 {attr.val}</Btn>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {attrs.some(a => !a.filled) && (
+              <div style={{ marginTop: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                <Btn variant="primary" size="sm" onClick={fillAllAttrs}>⚡ Auto-fill all</Btn>
+                <span style={{ fontSize: 11, color: "#EA580C" }}>⚠️ Verify accuracy after auto-fill</span>
+              </div>
+            )}
+          </div>
+
+          {/* === PRICE === */}
+          <div style={{ background: "#fff", borderRadius: 8, border: "1px solid #E5E7EB", padding: 24, marginBottom: 16 }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700, color: "#1F2937", margin: "0 0 16px" }}>Pricing & Shipping</h3>
+            <div style={{ display: "flex", gap: 16, marginBottom: 10 }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "block", marginBottom: 4 }}>Unit Price (USD) <span style={{ color: "#DC2626" }}>*</span></label>
+                <input value={price} onChange={e => setPrice(e.target.value)} placeholder="e.g. 15.00 - 25.00" style={{ width: "100%", padding: "10px 12px", border: "1px solid #D1D5DB", borderRadius: 6, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: 12, fontWeight: 600, color: "#374151", display: "block", marginBottom: 4 }}>MOQ <span style={{ color: "#DC2626" }}>*</span></label>
+                <input value={moq} onChange={e => setMoq(e.target.value)} style={{ width: "100%", padding: "10px 12px", border: "1px solid #D1D5DB", borderRadius: 6, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+              </div>
+            </div>
+            <div style={{ background: "#FEF2F2", border: "1px solid #FECACA", borderRadius: 6, padding: "8px 12px", fontSize: 11, color: "#DC2626" }}>
+              🔒 Price must be set manually — AI does not auto-generate pricing to prevent financial risk.
+            </div>
+          </div>
+        </div>
+
+        {/* ─ Right Panel ─ */}
+        <div style={{ width: 310, borderLeft: "1px solid #E5E7EB", background: "#fff", display: "flex", flexDirection: "column", position: "sticky", top: 96, height: "calc(100vh - 96px)", flexShrink: 0 }}>
+          {/* Score */}
+          <div style={{ padding: "14px 16px 10px", borderBottom: "1px solid #E5E7EB" }}>
+            <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+              <span style={{ fontSize: 32, fontWeight: 800, color: score >= 80 ? "#16A34A" : score >= 60 ? "#FF6A00" : "#DC2626" }}>{scoreOf6}</span>
+              <span style={{ fontSize: 13, color: "#9CA3AF" }}>/6.0 ⓘ</span>
+              <Btn variant="secondary" size="xs" onClick={() => {}} style={{ marginLeft: "auto" }}>Recalculate</Btn>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+              <div style={{ flex: 1, height: 4, background: "#E5E7EB", borderRadius: 99, overflow: "hidden" }}>
+                <div style={{ width: `${score}%`, height: "100%", background: score >= 80 ? "#16A34A" : score >= 60 ? "#FF6A00" : "#DC2626", borderRadius: 99, transition: "width 0.5s" }} />
+              </div>
+              <span style={{ fontSize: 11, color: "#6B7280" }}>Top {top}%</span>
+            </div>
+          </div>
+
+          {/* Tabs */}
+          <div style={{ display: "flex", borderBottom: "1px solid #E5E7EB" }}>
+            {[{ key: "diagnosis", label: "📋 Diagnosis", badge: totalIssues }, { key: "chat", label: "💬 AI Chat" }].map(t => (
+              <div key={t.key} onClick={() => setPanelTab(t.key)} style={{
+                flex: 1, padding: "9px 0", textAlign: "center", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                color: panelTab === t.key ? "#FF6A00" : "#6B7280",
+                borderBottom: panelTab === t.key ? "2px solid #FF6A00" : "2px solid transparent",
+              }}>
+                {t.label}{t.badge > 0 && panelTab !== t.key ? <span style={{ background: "#DC2626", color: "#fff", borderRadius: 99, padding: "0px 5px", fontSize: 10, marginLeft: 3 }}>{t.badge}</span> : null}
+              </div>
+            ))}
+          </div>
+
+          {/* Content */}
+          <div style={{ flex: 1, overflow: "auto" }}>
+            {panelTab === "diagnosis" ? (
+              <div style={{ padding: 12 }}>
+                {redCount > 0 && <>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#DC2626", marginBottom: 6 }}>⛔ Issues detected</div>
+                  {images.filter(i => i.issue === "watermark").map(img => (
+                    <IssueCard key={img.id} severity="red" done={img.fixed} title={`${img.label}: Watermark`} desc="Must remove before publishing"
+                      actions={[{ label: "Remove", onClick: () => fixImage(img.id) }]} />
+                  ))}
+                  {attrs.filter(a => a.req && !a.filled).map(a => (
+                    <IssueCard key={a.key} severity="red" done={a.filled} title={`Required: ${a.label}`} desc={`AI: "${a.val}" (${a.conf}%)`}
+                      actions={[{ label: `Fill: ${a.val}`, onClick: () => fillAttr(attrs.indexOf(a)) }]} />
+                  ))}
+                </>}
+                {orangeCount > 0 && <>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: "#EA580C", marginTop: 10, marginBottom: 6 }}>⚠️ Suggestions</div>
+                  {images.filter(i => (i.issue === "dark" || i.issue === "messy_bg") && !i.fixed).map(img => (
+                    <IssueCard key={img.id} severity="orange" done={img.fixed} title={`${img.label}: ${img.issue === "dark" ? "Too dark" : "Messy BG"}`}
+                      actions={[{ label: "Fix", onClick: () => fixImage(img.id) }, { label: "Skip", onClick: () => fixImage(img.id) }]} />
+                  ))}
+                  {attrs.filter(a => !a.req && !a.filled).map(a => (
+                    <IssueCard key={a.key} severity="orange" done={a.filled} title={`Optional: ${a.label}`} desc={`"${a.val}" — ${a.src}`}
+                      actions={[{ label: "Fill", onClick: () => fillAttr(attrs.indexOf(a)) }]} />
+                  ))}
+                </>}
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#16A34A", marginTop: 10, marginBottom: 6 }}>💡 Bonus indicators</div>
+                <IssueCard severity="green" title="Product information clarity" desc="Structured title with clear specs" />
+                <IssueCard severity="green" title="Customization service" desc="Offer OEM/ODM to attract B2B buyers" />
+                <IssueCard severity="green" title="Add certifications (SGS, EN581)" desc="23% more inquiries with cert badges" />
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+                <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
+                  {chatMessages.map((m, i) => <ChatBubble key={i} {...m} />)}
+                  <div ref={chatEndRef} />
+                </div>
+                <div style={{ padding: "6px 12px", display: "flex", gap: 4, flexWrap: "wrap", borderTop: "1px solid #F3F4F6" }}>
+                  {["Rewrite my title", "Compare to competitors", "Write description", "Pricing advice"].map(q => (
+                    <button key={q} onClick={() => handleChat(q)} style={{ background: "#F3F4F6", border: "1px solid #E5E7EB", borderRadius: 16, padding: "3px 10px", fontSize: 10, color: "#6B7280", cursor: "pointer", fontFamily: "inherit" }}>{q}</button>
+                  ))}
+                </div>
+                <div style={{ padding: "8px 12px 10px", borderTop: "1px solid #E5E7EB", display: "flex", gap: 6 }}>
+                  <input value={chatInput} onChange={e => setChatInput(e.target.value)} onKeyDown={e => e.key === "Enter" && handleChat()} placeholder="Ask complex questions..." style={{ flex: 1, padding: "7px 12px", border: "1px solid #D1D5DB", borderRadius: 20, fontSize: 12, outline: "none" }} />
+                  <Btn variant="primary" size="sm" onClick={() => handleChat()} style={{ borderRadius: 20 }}>Send</Btn>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Publish Modal */}
+      {showPublish && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 9999 }}>
+          <div style={{ background: "#fff", borderRadius: 12, padding: 28, width: 420 }}>
+            <h3 style={{ fontSize: 17, fontWeight: 700, margin: "0 0 12px" }}>🚀 Pre-publish Review</h3>
+            <div style={{ background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: 8, padding: "8px 12px", fontSize: 12, color: "#EA580C", marginBottom: 14 }}>
+              ⚠️ AI-generated values below. Please confirm accuracy.
+            </div>
+            {attrs.filter(a => a.filled).map((a, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #F3F4F6", fontSize: 12 }}>
+                <span style={{ color: "#6B7280" }}>{a.label}</span>
+                <span style={{ color: "#1F2937", fontWeight: 500 }}>{a.val} ✓</span>
+              </div>
+            ))}
+            <div style={{ marginTop: 14, background: "#F0FDF4", border: "1px solid #BBF7D0", borderRadius: 6, padding: "8px 12px", fontSize: 11, color: "#16A34A" }}>
+              Multi-market: 🇺🇸 EN · 🇯🇵 JA · 🇪🇸 ES
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+              <Btn variant="secondary" size="md" onClick={() => setShowPublish(false)} style={{ flex: 1 }}>Back</Btn>
+              <Btn variant="success" size="md" onClick={() => { setShowPublish(false); alert("✅ Published! Performance report in 7 days."); }} style={{ flex: 1 }}>Confirm & Publish</Btn>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+</script>
+</body>
+</html>
